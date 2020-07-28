@@ -1,0 +1,28 @@
+#!/usr/bin/env groovy
+
+pipelineJob('Demo-Go-App') {
+    displayName('Build Demo app')
+
+    properties {
+        pipelineTriggers {
+            triggers {
+                githubPush()
+            }
+        }
+    }
+
+    definition {
+        cpsScm {
+            scm {
+                git {
+                    remote {
+                        url('https://github.com/srvmsr/demo-app.git')
+                        credentials('jenkins-operator')
+                    }
+                    branches('*/master')
+                }
+            }
+            scriptPath('cicd/pipelines/demoapp.jenkins')
+        }
+    }
+}

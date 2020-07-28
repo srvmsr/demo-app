@@ -1,0 +1,83 @@
+#!/usr/bin/env groovy
+
+def label = "docker-jenkins-${UUID.randomUUID().toString()}"
+def home = "/home/jenkins"
+def workspace = "${home}/agent/workspace/build-jenkins-operator"
+def workdir = "${workspace}/src/github.com/srvmsr/demo-app/"
+
+def dockerRepoName = "srvmsr/nycicd"
+
+
+podTemplate(label: label,
+        containers: [
+                containerTemplate(name: 'jnlp', image: 'azolo/jnlp-kubectl-slave', runAsUser: '0'),
+                containerTemplate(name: 'docker', image: 'docker:latest', command: 'cat', ttyEnabled: true, runAsUser: '0'),
+                containerTemplate(name: 'go', image: 'golang:alpine', command: 'cat', ttyEnabled: true),
+            ],
+            volumes: [
+                hostPathVolume(hostPath: '/var/run/docker.sock', mountPath: '/var/run/docker.sock'),
+                secretVolume(secretName: 'docker-secret', mountPath: '/root/.docker')
+            ], runAsUser: '0'
+        ) {
+    node(label) {
+        dir(workdir) {
+            stage('Checkout') {
+                timeout(time: 3, unit: 'MINUTES') {
+                    checkout scm
+                }
+                //Fetch tags if no new tags found use commit id for the release
+                def tag = sh (returnStdout: true,script: 'git fetch --tags && git tag --points-at HEAD | awk NF').trim()
+
+                def now = new Date().format("yyyy_MM_dd_HH_mm")
+
+                def shortCommit = sh(returnStdout: true, script: "git log -n 1 --pretty=format:'%h'").trim()
+
+                def version = tag ?: now + shortCommit
+                env.DOCKERTAG = dockerRepoName + ":" + version
+                env.GOCACHE= "/tmp"
+            }
+            stage('Build Go app') {
+                container('go') {
+                    echo "Building go..."
+                    sh """ 
+                       apk --no-cache --update add gcc libc-dev
+                       mkdir -p /go/src/Demo-Go-App
+                       cp main.go main_test.go /go/src/Demo-Go-App
+                       cd /go/src/Demo-Go-App
+                       go build
+                       """
+                }
+            }
+            stage('Test') {
+                container('go') {
+                    echo "Running Tests..."
+                    sh """
+                       mkdir -p /go/src/Demo-Go-App
+                       cp main.go main_test.go /go/src/Demo-Go-App
+                       cd /go/src/Demo-Go-App
+                       go clean -cache        
+                       go test ./... -v -short           
+                       """
+                }
+            }
+            stage('Docker Build & Push') {
+                container('docker') {
+                    echo "Building docker image..."
+                    sh """
+                       docker build . -t $DOCKERTAG
+                       docker push $DOCKERTAG
+                       """
+                }
+            }
+            stage('Deploy') {
+                echo "Deploying application..."
+                    sh """
+                       sed -i "s#srvmsr/nycicd:latest#$DOCKERTAG#g" deployment.yml
+                       kubectl -n production apply -f deployment.yml
+                       kubectl wait -n production deployment.apps -l role=app --for=condition=available --timeout=300s
+                       """
+
+            }
+        }
+    }
+}
